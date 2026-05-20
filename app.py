@@ -187,4 +187,3 @@ if uploaded_video:
 				)
 		else:
 			st.warning("No text frames found. Try lowering the minimum OCR characters or scanning more frequently.")
-
