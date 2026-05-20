@@ -48,22 +48,23 @@ def clean_text(text: str) -> str:
 
 
 def detect_text(frame: np.ndarray, min_chars: int = 3, ocr_language: str = "eng") -> str:
-    """Return OCR text from a frame, or an empty string if text is too short."""
+    """
+    Return OCR text from a frame, or an empty string if text is too short.
+
+    This uses the older/stable OCR behavior, but allows different languages.
+    If a selected language is not installed, it safely falls back to English.
+    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # Upscale and clean the frame to help OCR read smaller text.
-    gray = cv2.resize(gray, None, fx=1.8, fy=1.8, interpolation=cv2.INTER_CUBIC)
+    # This preprocessing is the stable version from before.
+    gray = cv2.resize(gray, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # PSM 6 assumes a block of text. This tends to work well for ad frames.
-    config = "--psm 6"
-
     try:
-        raw_text = pytesseract.image_to_string(thresh, lang=ocr_language, config=config)
+        raw_text = pytesseract.image_to_string(thresh, lang=ocr_language)
     except pytesseract.TesseractError:
-        # Fallback to English if the chosen language is not installed locally.
-        raw_text = pytesseract.image_to_string(thresh, lang="eng", config=config)
+        raw_text = pytesseract.image_to_string(thresh, lang="eng")
 
     cleaned = clean_text(raw_text)
 
@@ -362,7 +363,7 @@ with st.sidebar:
     selected_language_code = OCR_LANGUAGES[selected_language_label]
 
     st.caption(
-        "Tip: If the ad has English plus another language, choose a combined option like English + Korean."
+        "If the ad has English plus another language, choose a combined option like English + Korean."
     )
 
     st.header("QC Detection Settings")
