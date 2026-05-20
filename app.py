@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import pytesseract
 import streamlit as st
+from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches
 
@@ -215,6 +216,64 @@ def extract_text_frames(
     return text_frames
 
 
+def create_full_ad_gif(
+    video_path: str,
+    output_dir: Path,
+    max_width: int = 720,
+    gif_fps: int = 8,
+    max_duration_seconds: int = 45,
+) -> str:
+    """
+    Create a GIF preview of the full ad for the final slide.
+
+    This works better than embedded video when the deck is uploaded to Google Slides.
+    """
+    capture = cv2.VideoCapture(video_path)
+    fps = capture.get(cv2.CAP_PROP_FPS)
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    if not fps or fps <= 0:
+        fps = 30
+
+    max_frames_to_read = min(total_frames, int(fps * max_duration_seconds))
+    step = max(1, int(fps / gif_fps))
+
+    frames = []
+    frame_number = 0
+
+    while frame_number < max_frames_to_read:
+        success, frame = capture.read()
+        if not success:
+            break
+
+        if frame_number % step == 0:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            height, width = rgb.shape[:2]
+            if width > max_width:
+                scale = max_width / width
+                new_size = (max_width, int(height * scale))
+                rgb = cv2.resize(rgb, new_size, interpolation=cv2.INTER_AREA)
+            frames.append(Image.fromarray(rgb))
+
+        frame_number += 1
+
+    capture.release()
+
+    gif_path = output_dir / "full_motion_reference.gif"
+
+    if frames:
+        frames[0].save(
+            gif_path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=int(1000 / gif_fps),
+            loop=0,
+            optimize=True,
+        )
+
+    return str(gif_path)
+
+
 def create_powerpoint(text_frames: List[FrameResult], video_path: str) -> str:
     """
     Create a PowerPoint storyboard deck.
@@ -223,7 +282,7 @@ def create_powerpoint(text_frames: List[FrameResult], video_path: str) -> str:
     - One captured frame per slide
     - Captured frame on the left
     - Completely blank notes area on the right
-    - Final slide includes full motion reference / video file note
+    - Final slide includes a full-ad GIF reference instead of embedded video
     """
     prs = Presentation()
     prs.slide_width = Inches(13.333)
@@ -255,39 +314,26 @@ def create_powerpoint(text_frames: List[FrameResult], video_path: str) -> str:
 
         blank_notes_box = slide.shapes.add_textbox(Inches(6.85), Inches(1.15), Inches(5.85), Inches(5.9))
         blank_notes_box.text_frame.text = ""
+        blank_notes_box.line.width = 1
 
-        # Add a very light border around the blank area so users know where notes can go.
-        line = blank_notes_box.line
-        line.width = 1
-
-    # Final slide: full ad reference.
+    # Final slide: full ad GIF reference.
     final_slide = prs.slides.add_slide(blank_layout)
     title_box = final_slide.shapes.add_textbox(Inches(0.4), Inches(0.3), Inches(12.5), Inches(0.5))
     title_box.text_frame.text = "Full Motion Reference"
 
-    note_box = final_slide.shapes.add_textbox(Inches(0.8), Inches(1.1), Inches(11.8), Inches(1.0))
-    note_box.text_frame.text = (
-        "Full ad reference video is included below when PowerPoint supports video embedding. "
-        "If the video does not play after uploading to Google Slides, upload the original video separately "
-        "or link it from Drive/Frame.io."
-    )
+    note_box = final_slide.shapes.add_textbox(Inches(0.8), Inches(0.9), Inches(11.8), Inches(0.5))
+    note_box.text_frame.text = "Full ad preview GIF for Google Slides compatibility."
 
-    try:
-        final_slide.shapes.add_movie(
-            video_path,
-            Inches(1.3),
-            Inches(2.25),
-            Inches(10.7),
-            Inches(4.5),
-            poster_frame_image=None,
-            mime_type="video/mp4",
-        )
-    except Exception:
-        fallback_box = final_slide.shapes.add_textbox(Inches(1.3), Inches(2.4), Inches(10.7), Inches(1.0))
-        fallback_box.text_frame.text = (
-            "Video could not be embedded automatically in this environment. "
-            "Please attach or link the original ad video as the full motion reference."
-        )
+    gif_dir = Path(tempfile.mkdtemp())
+    full_gif_path = create_full_ad_gif(video_path, gif_dir)
+
+    final_slide.shapes.add_picture(
+        full_gif_path,
+        Inches(1.3),
+        Inches(1.55),
+        width=Inches(10.7),
+        height=Inches(5.45),
+    )
 
     output_path = str(Path(tempfile.mkdtemp()) / "motion_storyboard_deck.pptx")
     prs.save(output_path)
