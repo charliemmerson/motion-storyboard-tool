@@ -10,7 +10,6 @@ import cv2
 import numpy as np
 import pytesseract
 import streamlit as st
-from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches
 
@@ -51,12 +50,12 @@ def detect_text(frame: np.ndarray, min_chars: int = 3, ocr_language: str = "eng"
     """
     Return OCR text from a frame, or an empty string if text is too short.
 
-    This uses the older/stable OCR behavior, but allows different languages.
+    This uses the stable OCR behavior, but allows different languages.
     If a selected language is not installed, it safely falls back to English.
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # This preprocessing is the stable version from before.
+    # Stable preprocessing.
     gray = cv2.resize(gray, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -216,130 +215,79 @@ def extract_text_frames(
     return text_frames
 
 
-def create_motion_gif(
-    video_path: str,
-    timestamp: float,
-    output_dir: Path,
-    index: int,
-    seconds_before: float = 0.75,
-    seconds_after: float = 1.25,
-    max_width: int = 420,
-    gif_fps: int = 8,
-) -> str:
-    """Create a short GIF around the selected timestamp for motion context."""
-    capture = cv2.VideoCapture(video_path)
-    fps = capture.get(cv2.CAP_PROP_FPS)
-    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+def create_powerpoint(text_frames: List[FrameResult], video_path: str) -> str:
+    """
+    Create a PowerPoint storyboard deck.
 
-    if not fps or fps <= 0:
-        fps = 30
-
-    start_time = max(0, timestamp - seconds_before)
-    end_time = timestamp + seconds_after
-
-    start_frame = int(start_time * fps)
-    end_frame = min(total_frames - 1, int(end_time * fps))
-    step = max(1, int(fps / gif_fps))
-
-    frames = []
-    capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-
-    frame_number = start_frame
-    while frame_number <= end_frame:
-        success, frame = capture.read()
-        if not success:
-            break
-
-        if (frame_number - start_frame) % step == 0:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            height, width = rgb.shape[:2]
-            if width > max_width:
-                scale = max_width / width
-                new_size = (max_width, int(height * scale))
-                rgb = cv2.resize(rgb, new_size, interpolation=cv2.INTER_AREA)
-            frames.append(Image.fromarray(rgb))
-
-        frame_number += 1
-
-    capture.release()
-
-    gif_path = output_dir / f"motion_{index:03d}_{timestamp:.2f}s.gif"
-
-    if frames:
-        frames[0].save(
-            gif_path,
-            save_all=True,
-            append_images=frames[1:],
-            duration=int(1000 / gif_fps),
-            loop=0,
-            optimize=True,
-        )
-
-    return str(gif_path)
-
-
-def create_powerpoint(
-    text_frames: List[FrameResult],
-    video_path: str,
-    include_motion_gifs: bool = True,
-    gif_before: float = 0.75,
-    gif_after: float = 1.25,
-) -> str:
-    """Create a PowerPoint storyboard with static frames plus optional motion GIFs."""
+    Layout:
+    - One captured frame per slide
+    - Captured frame on the left
+    - Completely blank notes area on the right
+    - Final slide includes full motion reference / video file note
+    """
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 
     blank_layout = prs.slide_layouts[6]
-    gif_dir = Path(tempfile.mkdtemp())
 
-    # Two storyboard moments per slide. Each moment gets a still frame and a motion GIF.
-    items_per_slide = 2
-
-    for slide_start in range(0, len(text_frames), items_per_slide):
+    for i, (frame_path, timestamp, detected_text) in enumerate(text_frames, start=1):
         slide = prs.slides.add_slide(blank_layout)
 
-        title_box = slide.shapes.add_textbox(Inches(0.4), Inches(0.2), Inches(12.5), Inches(0.4))
-        title_box.text_frame.text = "Motion Storyboard QC"
+        title_box = slide.shapes.add_textbox(Inches(0.4), Inches(0.2), Inches(12.5), Inches(0.45))
+        title_box.text_frame.text = f"Motion Storyboard QC — Frame {i}"
 
-        for j, (frame_path, timestamp, detected_text) in enumerate(
-            text_frames[slide_start:slide_start + items_per_slide]
-        ):
-            y_base = 0.85 + j * 3.15
+        timestamp_box = slide.shapes.add_textbox(Inches(0.6), Inches(0.72), Inches(5.8), Inches(0.3))
+        timestamp_box.text_frame.text = f"Timestamp: {timestamp:.2f}s"
 
-            static_label = slide.shapes.add_textbox(Inches(0.55), Inches(y_base - 0.25), Inches(2.5), Inches(0.25))
-            static_label.text_frame.text = "Static capture"
+        # Large captured frame on the left half of the slide.
+        slide.shapes.add_picture(
+            frame_path,
+            Inches(0.6),
+            Inches(1.15),
+            width=Inches(5.9),
+            height=Inches(4.45),
+        )
 
-            motion_label = slide.shapes.add_textbox(Inches(3.95), Inches(y_base - 0.25), Inches(2.5), Inches(0.25))
-            motion_label.text_frame.text = "Motion preview"
+        # Right side is intentionally blank for editors/reviewers to add notes, copy, or tables.
+        notes_label = slide.shapes.add_textbox(Inches(6.85), Inches(0.72), Inches(5.85), Inches(0.3))
+        notes_label.text_frame.text = "Notes / Copy / QC"
 
-            slide.shapes.add_picture(
-                frame_path,
-                Inches(0.55),
-                Inches(y_base),
-                width=Inches(3.0),
-                height=Inches(2.45),
-            )
+        blank_notes_box = slide.shapes.add_textbox(Inches(6.85), Inches(1.15), Inches(5.85), Inches(5.9))
+        blank_notes_box.text_frame.text = ""
 
-            if include_motion_gifs:
-                gif_path = create_motion_gif(
-                    video_path,
-                    timestamp,
-                    gif_dir,
-                    slide_start + j + 1,
-                    seconds_before=gif_before,
-                    seconds_after=gif_after,
-                )
-                slide.shapes.add_picture(
-                    gif_path,
-                    Inches(3.95),
-                    Inches(y_base),
-                    width=Inches(3.0),
-                    height=Inches(2.45),
-                )
+        # Add a very light border around the blank area so users know where notes can go.
+        line = blank_notes_box.line
+        line.width = 1
 
-            text_box = slide.shapes.add_textbox(Inches(7.35), Inches(y_base), Inches(5.4), Inches(2.45))
-            text_box.text_frame.text = f"Timestamp: {timestamp:.2f}s\n\nDetected copy:\n{detected_text[:450]}"
+    # Final slide: full ad reference.
+    final_slide = prs.slides.add_slide(blank_layout)
+    title_box = final_slide.shapes.add_textbox(Inches(0.4), Inches(0.3), Inches(12.5), Inches(0.5))
+    title_box.text_frame.text = "Full Motion Reference"
+
+    note_box = final_slide.shapes.add_textbox(Inches(0.8), Inches(1.1), Inches(11.8), Inches(1.0))
+    note_box.text_frame.text = (
+        "Full ad reference video is included below when PowerPoint supports video embedding. "
+        "If the video does not play after uploading to Google Slides, upload the original video separately "
+        "or link it from Drive/Frame.io."
+    )
+
+    try:
+        final_slide.shapes.add_movie(
+            video_path,
+            Inches(1.3),
+            Inches(2.25),
+            Inches(10.7),
+            Inches(4.5),
+            poster_frame_image=None,
+            mime_type="video/mp4",
+        )
+    except Exception:
+        fallback_box = final_slide.shapes.add_textbox(Inches(1.3), Inches(2.4), Inches(10.7), Inches(1.0))
+        fallback_box.text_frame.text = (
+            "Video could not be embedded automatically in this environment. "
+            "Please attach or link the original ad video as the full motion reference."
+        )
 
     output_path = str(Path(tempfile.mkdtemp()) / "motion_storyboard_deck.pptx")
     prs.save(output_path)
@@ -372,14 +320,9 @@ with st.sidebar:
     duplicate_threshold = st.slider("Duplicate filter strength", 1.0, 25.0, 8.0, 1.0)
     sequence_gap = st.slider("Moving text grouping window", 0.25, 2.0, 0.25, 0.25)
 
-    st.header("Motion Preview")
-    include_motion_gifs = st.checkbox("Include motion previews in deck", value=True)
-    gif_before = st.slider("GIF seconds before captured frame", 0.25, 2.0, 0.75, 0.25)
-    gif_after = st.slider("GIF seconds after captured frame", 0.25, 3.0, 1.25, 0.25)
-
 st.info(
     "Stable default: scan every 0.25s, minimum OCR characters 3, duplicate strength 8, moving text window 0.25. "
-    "For foreign-language ads, choose the matching OCR language in the sidebar."
+    "Each captured frame gets its own slide with blank space for editor notes. The final slide includes the full motion reference."
 )
 
 if uploaded_video:
@@ -410,14 +353,8 @@ if uploaded_video:
                     st.image(frame_path, caption=f"{timestamp:.2f}s")
                     st.caption(detected_text[:200])
 
-            with st.spinner("Building storyboard deck with motion previews..."):
-                pptx_path = create_powerpoint(
-                    frames,
-                    video_path,
-                    include_motion_gifs=include_motion_gifs,
-                    gif_before=gif_before,
-                    gif_after=gif_after,
-                )
+            with st.spinner("Building storyboard deck with individual review slides..."):
+                pptx_path = create_powerpoint(frames, video_path)
 
             with open(pptx_path, "rb") as f:
                 st.download_button(
