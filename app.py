@@ -255,18 +255,7 @@ def create_powerpoint(text_frames: List[FrameResult], video_path: str) -> str:
         blank_notes_box.text_frame.text = ""
         blank_notes_box.line.width = 1
 
-    final_slide = prs.slides.add_slide(blank_layout)
-
-    title_box = final_slide.shapes.add_textbox(Inches(0.4), Inches(0.3), Inches(12.5), Inches(0.5))
-    title_box.text_frame.text = "Full Motion Reference"
-
-    note_box = final_slide.shapes.add_textbox(Inches(1.0), Inches(2.0), Inches(10.8), Inches(1.5))
-    note_box.text_frame.text = (
-        "Please reference the original motion ad/video separately during QC review. "
-        "This keeps the generated deck lighter and more reliable in Google Slides."
-    )
-
-    output_path = str(Path(tempfile.mkdtemp()) / "motion_storyboard_deck.pptx")
+        output_path = str(Path(tempfile.mkdtemp()) / "motion_storyboard_deck.pptx")
     prs.save(output_path)
     return output_path
 
