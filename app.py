@@ -47,6 +47,38 @@ def clean_text(text: str) -> str:
     return " ".join(text.replace("\n", " ").split()).strip()
 
 
+def get_video_duration(video_path: str) -> float:
+    """Return video duration in seconds."""
+    capture = cv2.VideoCapture(video_path)
+    fps = capture.get(cv2.CAP_PROP_FPS)
+    total_frames = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+    capture.release()
+
+    if not fps or fps <= 0:
+        return 0.0
+
+    return float(total_frames / fps)
+
+
+def get_frame_at_timestamp(video_path: str, timestamp: float) -> np.ndarray | None:
+    """Grab one frame from the video at a specific timestamp."""
+    capture = cv2.VideoCapture(video_path)
+    fps = capture.get(cv2.CAP_PROP_FPS)
+
+    if not fps or fps <= 0:
+        fps = 30
+
+    frame_index = max(0, int(timestamp * fps))
+    capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+    success, frame = capture.read()
+    capture.release()
+
+    if not success:
+        return None
+
+    return frame
+
+
 def detect_text(frame: np.ndarray, min_chars: int = 3, ocr_language: str = "eng") -> str:
     """
     Return OCR text from a frame, or an empty string if text is too short.
@@ -340,6 +372,13 @@ def create_powerpoint(text_frames: List[FrameResult], video_path: str) -> str:
     return output_path
 
 
+def combine_and_sort_frames(auto_frames: List[FrameResult], manual_frames: List[FrameResult]) -> List[FrameResult]:
+    """Combine automatic and manual frames, then sort by timestamp."""
+    combined = auto_frames + manual_frames
+    combined.sort(key=lambda item: item[1])
+    return combined
+
+
 st.set_page_config(page_title="Motion Storyboard QC", layout="wide")
 
 st.title("Motion Storyboard QC Generator")
@@ -368,19 +407,33 @@ with st.sidebar:
 
 st.info(
     "Stable default: scan every 0.25s, minimum OCR characters 3, duplicate strength 8, moving text window 0.25. "
-    "Each captured frame gets its own slide with blank space for editor notes. The final slide includes the full motion reference."
+    "Use Manual Add Frame if the automatic scan misses a moment."
 )
+
+if "auto_frames" not in st.session_state:
+    st.session_state.auto_frames = []
+
+if "manual_frames" not in st.session_state:
+    st.session_state.manual_frames = []
 
 if uploaded_video:
     with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_video.name).suffix) as tmp:
         tmp.write(uploaded_video.read())
         video_path = tmp.name
 
+    # Reset stored frames when a new file is uploaded.
+    if st.session_state.get("current_video_name") != uploaded_video.name:
+        st.session_state.current_video_name = uploaded_video.name
+        st.session_state.auto_frames = []
+        st.session_state.manual_frames = []
+
+    duration = get_video_duration(video_path)
+
     st.video(video_path)
 
-    if st.button("Generate Storyboard"):
+    if st.button("Generate Automatic Storyboard Frames"):
         with st.spinner(f"Scanning video for text frames using {selected_language_label} OCR..."):
-            frames = extract_text_frames(
+            st.session_state.auto_frames = extract_text_frames(
                 video_path,
                 sample_every_seconds=sample_rate,
                 min_chars=min_chars,
@@ -389,25 +442,80 @@ if uploaded_video:
                 ocr_language=selected_language_code,
             )
 
-        st.success(f"Found {len(frames)} storyboard frames with text.")
+        st.success(f"Found {len(st.session_state.auto_frames)} automatic storyboard frames with text.")
 
-        if frames:
-            st.subheader("Preview")
-            cols = st.columns(3)
-            for i, (frame_path, timestamp, detected_text) in enumerate(frames):
-                with cols[i % 3]:
-                    st.image(frame_path, caption=f"{timestamp:.2f}s")
-                    st.caption(detected_text[:200])
+    st.divider()
 
-            with st.spinner("Building storyboard deck with individual review slides..."):
-                pptx_path = create_powerpoint(frames, video_path)
+    st.subheader("Manual Add Frame")
+    st.write(
+        "If the automatic scan misses a frame, use the timestamp slider below, preview the frame, then click Add This Frame."
+    )
 
-            with open(pptx_path, "rb") as f:
-                st.download_button(
-                    "Download Storyboard Deck for Google Slides",
-                    data=f,
-                    file_name="motion_storyboard_deck.pptx",
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                )
-        else:
-            st.warning("No text frames found. Try lowering the minimum OCR characters, scanning more frequently, or choosing a different OCR language.")
+    manual_timestamp = st.slider(
+        "Choose timestamp to capture manually",
+        min_value=0.0,
+        max_value=max(duration, 0.1),
+        value=0.0,
+        step=0.05,
+    )
+
+    preview_frame = get_frame_at_timestamp(video_path, manual_timestamp)
+
+    if preview_frame is not None:
+        preview_rgb = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
+        st.image(preview_rgb, caption=f"Manual preview at {manual_timestamp:.2f}s", width=500)
+
+        manual_note = st.text_input(
+            "Optional label for this manual frame",
+            value="Manually added frame",
+        )
+
+        if st.button("Add This Frame"):
+            manual_dir = Path(tempfile.mkdtemp())
+            frame_path = save_frame(
+                preview_frame,
+                manual_dir,
+                len(st.session_state.manual_frames) + 1,
+                manual_timestamp,
+            )
+
+            st.session_state.manual_frames.append(
+                (frame_path, manual_timestamp, manual_note)
+            )
+            st.success(f"Added manual frame at {manual_timestamp:.2f}s.")
+
+    st.divider()
+
+    combined_frames = combine_and_sort_frames(
+        st.session_state.auto_frames,
+        st.session_state.manual_frames,
+    )
+
+    st.subheader("Storyboard Frames to Export")
+    st.write(
+        f"Automatic frames: {len(st.session_state.auto_frames)} | Manual frames: {len(st.session_state.manual_frames)} | Total: {len(combined_frames)}"
+    )
+
+    if combined_frames:
+        cols = st.columns(3)
+        for i, (frame_path, timestamp, detected_text) in enumerate(combined_frames):
+            with cols[i % 3]:
+                st.image(frame_path, caption=f"{timestamp:.2f}s")
+                st.caption(detected_text[:200])
+
+        if st.button("Clear Manual Frames"):
+            st.session_state.manual_frames = []
+            st.rerun()
+
+        with st.spinner("Building storyboard deck with review slides..."):
+            pptx_path = create_powerpoint(combined_frames, video_path)
+
+        with open(pptx_path, "rb") as f:
+            st.download_button(
+                "Download Storyboard Deck for Google Slides",
+                data=f,
+                file_name="motion_storyboard_deck.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+    else:
+        st.warning("No frames selected yet. Run automatic detection or manually add frames.")
